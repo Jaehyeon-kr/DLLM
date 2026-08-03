@@ -9,7 +9,7 @@ from tokenizer import get_tokenizer
 ### environment (e.g. the local box) where it isn't installed, so we fall back to plain print. ###
 try:
     from rich.live import Live
-    from rich.console import Console
+    from rich.console import Console, Group
     from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
     from rich.text import Text
     _HAS_RICH = True
@@ -274,15 +274,18 @@ def denoise_span(model, tokenizer, x, editable, mask_token_id, num_steps, args,
         if args.show_steps:
             num_masked = int((x == mask_token_id).sum().item())
 
-            ### rich path: update the shared Live canvas + progress bar in place. Only the ###
-            ### first row, since the rows fall out of lockstep and printing all of them ###
-            ### buries the one you are actually watching. ###
+            ### rich path: one Live drives both the progress bar and the canvas, grouped into ###
+            ### a single renderable. rich forbids two live displays at once, so Progress must ###
+            ### not be started on its own here, only rendered inside this Live. Only the first ###
+            ### row, since the rows fall out of lockstep and printing all of them buries the ###
+            ### one you are actually watching. ###
             if live is not None:
-                canvas = render_canvas_rich(tokenizer, x[0], mask_token_id)
-                header = Text(f"t={t_next:.3f}  masked={num_masked}\n", style="bold green")
-                live.update(header + canvas)
                 if progress is not None and task is not None:
                     progress.advance(task, 1)
+                canvas = render_canvas_rich(tokenizer, x[0], mask_token_id)
+                header = Text(f"t={t_next:.3f}  masked={num_masked}\n", style="bold green")
+                body = header + canvas
+                live.update(Group(progress, body) if progress is not None else body)
             else:
                 print(f"  [step {step + 1}/{num_steps}] t={t_next:.3f} masked={num_masked}")
                 print(f"    {render_canvas(tokenizer, x[0], mask_token_id)}")
@@ -336,22 +339,23 @@ def generate(model, tokenizer, args, device):
             x = denoise_span(model, tokenizer, x, editable, mask_token_id, steps_per_block, args,
                              live=live, progress=progress, task=task)
 
-    ### With rich available and show_steps on, drive the whole run through one Live canvas + ###
-    ### progress bar. steps_per_block * num_blocks is the true total the bar counts up to. ###
+    ### With rich available and show_steps on, drive the whole run through a single Live that ###
+    ### renders a Group of the progress bar and the canvas. rich allows only one live display ###
+    ### at a time, so Progress is created but never entered as its own context, it is just a ###
+    ### child renderable. steps_per_block * num_blocks is the true total the bar counts up to. ###
     if args.show_steps and _HAS_RICH:
         console = Console(highlight=False)
-        with Progress(
+        progress = Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             "[progress.percentage]{task.percentage:>3.0f}%",
             TimeElapsedColumn(),
             TimeRemainingColumn(),
             console=console,
-            transient=True,
-        ) as progress:
-            task = progress.add_task("Denoising...", total=steps_per_block * num_blocks)
-            with Live("", refresh_per_second=8, console=console) as live:
-                run_blocks(live=live, progress=progress, task=task)
+        )
+        task = progress.add_task("Denoising...", total=steps_per_block * num_blocks)
+        with Live(progress, refresh_per_second=8, console=console) as live:
+            run_blocks(live=live, progress=progress, task=task)
     else:
         run_blocks()
 
