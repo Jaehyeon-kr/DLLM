@@ -157,6 +157,15 @@ def parse_args():
         action=argparse.BooleanOptionalAction
     )
 
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        help="Resume training from a checkpoint. Either a path to a `checkpoint_<step>` "
+             "directory, or 'auto' to pick the latest checkpoint under working_directory/experiment_name. "
+             "The step count, optimizer, scheduler and RNG state are all restored.",
+        default=None,
+        type=str
+    )
+
     args = parser.parse_args()
 
     return args
@@ -228,10 +237,60 @@ model, optimizer, train_dataloader, eval_dataloader, scheduler = accelerator.pre
     model, optimizer, train_dataloader, eval_dataloader, scheduler
 )
 
+### Resume From Checkpoint (optional) ###
+### accelerator.save_state stores model + optimizer + scheduler + RNG, so load_state ###
+### restores everything. We only need to recover the step count ourselves, which we ###
+### read back from the checkpoint directory name (checkpoint_<step>). ###
+completed_steps = 0
+
+if args.resume_from_checkpoint is not None:
+
+    resume_path = args.resume_from_checkpoint
+
+    ### 'auto' -> find the highest checkpoint_<step> under the experiment dir ###
+    if resume_path == "auto":
+        candidates = []
+        if os.path.isdir(path_to_experiment):
+            for name in os.listdir(path_to_experiment):
+                if name.startswith("checkpoint_"):
+                    suffix = name.rsplit("_", 1)[-1]
+                    if suffix.isdigit():
+                        candidates.append((int(suffix), os.path.join(path_to_experiment, name)))
+        if not candidates:
+            raise FileNotFoundError(
+                f"resume_from_checkpoint='auto' but no checkpoint_<step> directory found in {path_to_experiment}"
+            )
+        resume_step, resume_path = max(candidates, key=lambda c: c[0])
+    else:
+        ### Read the step count off the directory name ###
+        base = os.path.basename(os.path.normpath(resume_path))
+        suffix = base.rsplit("_", 1)[-1]
+        if not (base.startswith("checkpoint_") and suffix.isdigit()):
+            raise ValueError(
+                f"Could not infer step count from checkpoint path '{resume_path}'. "
+                f"Expected a directory named 'checkpoint_<step>'."
+            )
+        resume_step = int(suffix)
+
+    if not os.path.isdir(resume_path):
+        raise FileNotFoundError(f"Checkpoint directory does not exist: {resume_path}")
+
+    accelerator.print(f"Resuming from checkpoint {resume_path} at step {resume_step}")
+    accelerator.load_state(resume_path)
+    completed_steps = resume_step
+
+    if completed_steps >= args.num_training_steps:
+        raise ValueError(
+            f"Checkpoint step ({completed_steps}) >= num_training_steps ({args.num_training_steps}). "
+            f"Nothing left to train. Increase --num_training_steps to continue."
+        )
+
 ### Start Training ###
 train = True
-completed_steps = 0
-progress_bar = tqdm(range(completed_steps, args.num_training_steps), disable=not accelerator.is_local_main_process)
+progress_bar = tqdm(range(completed_steps, args.num_training_steps),
+                    initial=completed_steps,
+                    total=args.num_training_steps,
+                    disable=not accelerator.is_local_main_process)
 
 while train:
 
