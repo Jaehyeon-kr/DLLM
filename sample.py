@@ -5,6 +5,17 @@ from transformers import AutoModelForMaskedLM
 
 from tokenizer import get_tokenizer
 
+### rich is optional. inference.py depends on it, but sample.py should still run on a bare ###
+### environment (e.g. the local box) where it isn't installed, so we fall back to plain print. ###
+try:
+    from rich.live import Live
+    from rich.console import Console
+    from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+    from rich.text import Text
+    _HAS_RICH = True
+except ImportError:
+    _HAS_RICH = False
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Masked Diffusion LM Sampling")
@@ -190,10 +201,31 @@ def render_canvas(tokenizer, sequence, mask_token_id):
     return text.replace("\n", "\\n")
 
 
+def render_canvas_rich(tokenizer, sequence, mask_token_id):
+    """rich.Text version of render_canvas: still-masked positions are dimmed to '_', decided
+    tokens are shown normally. Decoding per token loses the subword gluing render_canvas gets
+    from decoding the whole row, but token level color is the whole point here."""
+
+    out = Text()
+    ids = sequence.tolist()
+    for tok_id in ids:
+        if tok_id == mask_token_id:
+            out.append("_", style="dim")
+        else:
+            piece = tokenizer.decode([tok_id], skip_special_tokens=False)
+            piece = piece.replace("\n", "\\n")
+            out.append(piece, style="white")
+    return out
+
+
 @torch.inference_mode()
-def denoise_span(model, tokenizer, x, editable, mask_token_id, num_steps, args):
+def denoise_span(model, tokenizer, x, editable, mask_token_id, num_steps, args,
+                 live=None, progress=None, task=None):
     """Run the reverse process over the positions marked editable. Everything else, prompt
-    and already finished blocks alike, is held fixed by construction."""
+    and already finished blocks alike, is held fixed by construction.
+
+    live/progress/task are the shared rich widgets created in generate(). When they are None
+    (rich missing, or show_steps off) we fall back to the plain print path."""
 
     attention_mask = torch.ones_like(x)
     num_editable = int(editable[0].sum().item())
@@ -240,12 +272,20 @@ def denoise_span(model, tokenizer, x, editable, mask_token_id, num_steps, args):
         x = torch.where(commit, predicted, x)
 
         if args.show_steps:
-            print(f"  [step {step + 1}/{num_steps}] t={t_next:.3f} "
-                  f"masked={int((x == mask_token_id).sum().item())}")
+            num_masked = int((x == mask_token_id).sum().item())
 
-            ### Only the first row, since the rows fall out of lockstep and printing all of ###
-            ### them buries the one you are actually watching ###
-            print(f"    {render_canvas(tokenizer, x[0], mask_token_id)}")
+            ### rich path: update the shared Live canvas + progress bar in place. Only the ###
+            ### first row, since the rows fall out of lockstep and printing all of them ###
+            ### buries the one you are actually watching. ###
+            if live is not None:
+                canvas = render_canvas_rich(tokenizer, x[0], mask_token_id)
+                header = Text(f"t={t_next:.3f}  masked={num_masked}\n", style="bold green")
+                live.update(header + canvas)
+                if progress is not None and task is not None:
+                    progress.advance(task, 1)
+            else:
+                print(f"  [step {step + 1}/{num_steps}] t={t_next:.3f} masked={num_masked}")
+                print(f"    {render_canvas(tokenizer, x[0], mask_token_id)}")
 
     ### The schedule should have committed everything by t=0, but never hand a half masked ###
     ### block to the next one. Fill any stragglers greedily ###
@@ -281,17 +321,39 @@ def generate(model, tokenizer, args, device):
     num_blocks = (args.gen_length + block_length - 1) // block_length
     steps_per_block = max(1, args.num_steps // num_blocks)
 
-    for block in range(num_blocks):
-        start = prompt_length + block * block_length
-        end = min(start + block_length, total_length)
+    def run_blocks(live=None, progress=None, task=None):
+        nonlocal x
+        for block in range(num_blocks):
+            start = prompt_length + block * block_length
+            end = min(start + block_length, total_length)
 
-        editable = torch.zeros_like(x, dtype=torch.bool)
-        editable[:, start:end] = True
+            editable = torch.zeros_like(x, dtype=torch.bool)
+            editable[:, start:end] = True
 
-        if args.show_steps:
-            print(f"[block {block + 1}/{num_blocks}] positions {start}:{end}")
+            if args.show_steps and live is None:
+                print(f"[block {block + 1}/{num_blocks}] positions {start}:{end}")
 
-        x = denoise_span(model, tokenizer, x, editable, mask_token_id, steps_per_block, args)
+            x = denoise_span(model, tokenizer, x, editable, mask_token_id, steps_per_block, args,
+                             live=live, progress=progress, task=task)
+
+    ### With rich available and show_steps on, drive the whole run through one Live canvas + ###
+    ### progress bar. steps_per_block * num_blocks is the true total the bar counts up to. ###
+    if args.show_steps and _HAS_RICH:
+        console = Console(highlight=False)
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            "[progress.percentage]{task.percentage:>3.0f}%",
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("Denoising...", total=steps_per_block * num_blocks)
+            with Live("", refresh_per_second=8, console=console) as live:
+                run_blocks(live=live, progress=progress, task=task)
+    else:
+        run_blocks()
 
     return x, prompt_length
 
