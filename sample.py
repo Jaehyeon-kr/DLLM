@@ -202,7 +202,7 @@ def render_canvas(tokenizer, sequence, mask_token_id):
 
 
 def render_canvas_rich(tokenizer, sequence, mask_token_id):
-    """rich.Text version of render_canvas: still-masked positions are dimmed to '_', decided
+    """rich.Text version of render_canvas: still-masked positions show a dimmed [MASK], decided
     tokens are shown normally. Decoding per token loses the subword gluing render_canvas gets
     from decoding the whole row, but token level color is the whole point here."""
 
@@ -210,7 +210,7 @@ def render_canvas_rich(tokenizer, sequence, mask_token_id):
     ids = sequence.tolist()
     for tok_id in ids:
         if tok_id == mask_token_id:
-            out.append("_", style="dim")
+            out.append("[MASK]", style="dim")
         else:
             piece = tokenizer.decode([tok_id], skip_special_tokens=False)
             piece = piece.replace("\n", "\\n")
