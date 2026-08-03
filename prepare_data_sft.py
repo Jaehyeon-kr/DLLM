@@ -77,14 +77,22 @@ def prepare_data(args):
                            cache_dir=cache_dir)
     
     def apply_chat_template(query, response):
-        return tokenizer.apply_chat_template(
+        ### Newer transformers return a BatchEncoding dict from apply_chat_template even with ###
+        ### tokenize=True, so return_dict=False pins it to a flat list of ids. Older versions ###
+        ### already return the list and ignore the flag, so this is safe either way. ###
+        tokenized = tokenizer.apply_chat_template(
             [
                 {"role": "user", "content": query},
                 {"role": "assistant", "content": response}
             ],
             tokenize=True,
             add_special_tokens=True,
+            return_dict=False,
         )
+        ### Belt and suspenders: if a version still hands back a dict, pull the ids out ###
+        if isinstance(tokenized, dict):
+            tokenized = tokenized["input_ids"]
+        return tokenized
     
     def preprocess(example):
         
