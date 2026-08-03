@@ -1,0 +1,14 @@
+python sample.py \
+    --hf_model_name "answerdotai/ModernBERT-base" \
+    --path_to_checkpoint "./dllm_exp/dllm/checkpoint_100" \
+    --prompt "" \
+    --gen_length 128 \
+    --num_steps 128 \
+    --block_length 32 \
+    --strategy confidence \
+    --temperature 1.0 \
+    --top_p 0.95 \
+    --num_samples 1 \
+    --seed 42 \
+    --dtype float32 \
+    --show_steps

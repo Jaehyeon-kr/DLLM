@@ -1,0 +1,19 @@
+python pretrain.py \
+    --experiment_name "dllm" \
+    --working_directory dllm_exp \
+    --hf_model_name "answerdotai/ModernBERT-base" \
+    --mixed_precision bf16 \
+    --path_to_prepped_data "./prepped_data" \
+    --num_workers 0 \
+    --per_gpu_batch_size 16 \
+    --gradient_accumulation_steps 16 \
+    --num_training_steps 400000 \
+    --max_grad_norm 1.0 \
+    --lr_scheduler_type linear \
+    --num_warmup_steps 10 \
+    --logging_steps 400000 \
+    --evaluation_interval 10 \
+    --checkpoint_interval 10 \
+    --learning_rate 1e-4 \
+    --weight_decay 2e-5 \
+    --log_wandb

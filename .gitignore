@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+
+### accelerator.save_state writes the optimizer alongside the model, so a single checkpoint ###
+### is close to 1.8GB. These belong in Drive or a release, not in git ###
+dllm_exp/
+work_dir/
+
+### Regenerated from C4 / Alpaca by the prepare_data scripts in minutes ###
+prepped_data/
+prepped_sft_data/
+
+wandb/
