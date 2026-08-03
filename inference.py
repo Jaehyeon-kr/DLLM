@@ -43,12 +43,19 @@ def prepare_conditional_tokens_for_inference(seq_len, tokenizer, prompt, device=
     ]
 
     ### Tokenize ###
+    ### return_dict=False pins the output to a flat list of ids. Newer transformers otherwise ###
+    ### hand back a BatchEncoding / tokenizers.Encoding here, which torch.tensor can't read. ###
     tokenized = tokenizer.apply_chat_template(
         chat_template,
         tokenize=True,
         add_special_tokens=True,
-        add_generation_prompt=True
+        add_generation_prompt=True,
+        return_dict=False
     )
+
+    ### Belt and suspenders: if a version still returns a dict, pull the ids out ###
+    if isinstance(tokenized, dict):
+        tokenized = tokenized["input_ids"]
 
     ### Convert to Tensor and Move to Device ###
     prompt_tokens = torch.tensor(tokenized).to(device)
