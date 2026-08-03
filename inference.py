@@ -3,7 +3,7 @@ import argparse
 from transformers import AutoModelForMaskedLM
 import torch
 from rich.live import Live
-from rich.console import Console
+from rich.console import Console, Group
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.text import Text
 from tokenizer import get_tokenizer
@@ -107,113 +107,116 @@ def inference(input_tokens,
     ### Nice Printing Stuff ##
     console = Console(highlight=False)
 
-    with Progress(
+    ### rich allows only one live display at a time, so Progress is created but never entered ###
+    ### as its own context. A single Live renders a Group of the bar plus the decoded text. ###
+    progress = Progress(
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         "[progress.percentage]{task.percentage:>3.0f}%",
         TimeElapsedColumn(),
         TimeRemainingColumn(),
         console=console,
-        transient=True,
-    ) as progress:
-        
-        ### What Controls our Progress Bar ###
-        task = progress.add_task("Generating...", total=num_steps)
+    )
 
-        ### Get Timesteps for Inference ###
-        times = torch.linspace(1, 0, num_steps + 1, device=device)
+    ### What Controls our Progress Bar ###
+    task = progress.add_task("Generating...", total=num_steps)
 
-        with Live("", refresh_per_second=5, console=console) as live:
-            for t, s in zip(times[:-1], times[1:]):
+    ### Get Timesteps for Inference ###
+    times = torch.linspace(1, 0, num_steps + 1, device=device)
 
-                ### Compute Logits ###
-                logits = model(input_tokens, attention_mask=attention_mask).logits
+    with Live(progress, refresh_per_second=5, console=console) as live:
+        for t, s in zip(times[:-1], times[1:]):
 
-                ### Sample Gen Token from Masked Tokens ###
-                probs = torch.softmax(logits[mask], dim=-1)
-                input_tokens[mask] = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            ### Compute Logits ###
+            logits = model(input_tokens, attention_mask=attention_mask).logits
 
-                ### All Tokens are Randomly Remasked ###
-                if remasking == "random":
+            ### Sample Gen Token from Masked Tokens ###
+            probs = torch.softmax(logits[mask], dim=-1)
+            input_tokens[mask] = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
-                    ### For Every Position, sample a value betweewn 0 and 1 ###
-                    remask_probs = torch.rand_like(mask, dtype=torch.float, device=device)
+            ### All Tokens are Randomly Remasked ###
+            if remasking == "random":
 
-                    ### If less than proportion token is selected to be remasked ###
-                    remask_probs = (remask_probs < s/t)
+                ### For Every Position, sample a value betweewn 0 and 1 ###
+                remask_probs = torch.rand_like(mask, dtype=torch.float, device=device)
 
-                    ### Only replace if our mask token was previous True and is again True ###
-                    ### once a token is false (no more masking) it is here to stay! ###
-                    mask = mask & remask_probs
+                ### If less than proportion token is selected to be remasked ###
+                remask_probs = (remask_probs < s/t)
 
-                    ### Set those tokens back to mask ###
+                ### Only replace if our mask token was previous True and is again True ###
+                ### once a token is false (no more masking) it is here to stay! ###
+                mask = mask & remask_probs
+
+                ### Set those tokens back to mask ###
+                input_tokens[mask] = tokenizer.mask_token_id
+
+            ### Low confidence Tokens are Randomly Remasked ###
+            elif remasking == "low_confidence":
+
+                ### Compute Probs for all Tokens ###
+                probs_all = torch.nn.functional.softmax(logits, dim=-1)
+
+                ### Get the probability of the actually selected token ###
+                ### probs_all: 1 x seq_len x vocab_size
+                ### input_tokens: 1 x seq_len
+                chosen_token_probs = torch.gather(probs_all, dim=-1,
+                                                  index=input_tokens.unsqueeze(-1)).squeeze(-1)
+
+                ### Make sure to set all tokens already selected to not be remasked to again ###
+                ### not be selected to be remasked. We can just set them to 1 because we want ###
+                ### low confidence (prob) tokens to be replaced! (set False to 1) ###
+                chosen_token_probs[~mask] = 1.0
+
+                ### Compute Proportion of Tokens to Remask out of the tokens that are currently masked ###
+                num_to_remask = int((s/t) * mask.sum().item())
+
+                if num_to_remask > 0:
+
+                    ### Find the lowest prob tokens ###
+                    lowest_confidence_idx = torch.topk(chosen_token_probs, num_to_remask, largest=False).indices
+
+                    ### Create a New Mask (where everything is set to False) ###
+                    new_mask = torch.zeros_like(mask)
+
+                    ### Set the lowest confidence tokens to be remasked ###
+                    new_mask[0, lowest_confidence_idx] = True
+                    mask = new_mask
+
+                    ### Update our Input Tokens with Mask Tokens ###
                     input_tokens[mask] = tokenizer.mask_token_id
 
-                ### Low confidence Tokens are Randomly Remasked ###
-                elif remasking == "low_confidence":
-                    
-                    ### Compute Probs for all Tokens ###
-                    probs_all = torch.nn.functional.softmax(logits, dim=-1)
+            if show_mask:
+                ### Get all of the Tokens ###
+                decoded_tokens = tokenizer.convert_ids_to_tokens(input_tokens[0])
 
-                    ### Get the probability of the actually selected token ###
-                    ### probs_all: 1 x seq_len x vocab_size
-                    ### input_tokens: 1 x seq_len
-                    chosen_token_probs = torch.gather(probs_all, dim=-1, 
-                                                      index=input_tokens.unsqueeze(-1)).squeeze(-1)
-                    
-                    ### Make sure to set all tokens already selected to not be remasked to again ###
-                    ### not be selected to be remasked. We can just set them to 1 because we want ###
-                    ### low confidence (prob) tokens to be replaced! (set False to 1) ###
-                    chosen_token_probs[~mask] = 1.0
+                ### Keep [MASK] tokens, drop all other special tokens ###
+                cleaned_tokens = []
+                for tok in decoded_tokens:
+                    if tok == tokenizer.mask_token:  # keep mask tokens
+                        cleaned_tokens.append(tok)
+                    elif tok in tokenizer.all_special_tokens:  # drop all other specials
+                        continue
+                    else:
+                        cleaned_tokens.append(tok)
 
-                    ### Compute Proportion of Tokens to Remask out of the tokens that are currently masked ###
-                    num_to_remask = int((s/t) * mask.sum().item())
+                ### Put all the tokens back together into a string ###
+                decoded_after = tokenizer.convert_tokens_to_string(cleaned_tokens)
 
-                    if num_to_remask > 0:
+            else:
+                decoded_after = tokenizer.batch_decode(input_tokens, skip_special_tokens=True)[0]
 
-                        ### Find the lowest prob tokens ###
-                        lowest_confidence_idx = torch.topk(chosen_token_probs, num_to_remask, largest=False).indices
+            if prompt is None:
+                format_text = format_display_for_unconditional(decoded_after)
+            else:
+                ### Remove Prompt Text from Assistant Text ###
+                assistant_text = decoded_after.replace(prompt, "").strip()
+                ### Remove Keywords user and assistant ###
+                assistant_text = clean_text(assistant_text)
+                format_text = format_display_for_qa(prompt, assistant_text)
 
-                        ### Create a New Mask (where everything is set to False) ###
-                        new_mask = torch.zeros_like(mask)
-
-                        ### Set the lowest confidence tokens to be remasked ###
-                        new_mask[0, lowest_confidence_idx] = True
-                        mask = new_mask
-
-                        ### Update our Input Tokens with Mask Tokens ###
-                        input_tokens[mask] = tokenizer.mask_token_id
-                
-                if show_mask:
-                    ### Get all of the Tokens ###
-                    decoded_tokens = tokenizer.convert_ids_to_tokens(input_tokens[0])
-
-                    ### Keep [MASK] tokens, drop all other special tokens ###
-                    cleaned_tokens = []
-                    for tok in decoded_tokens:
-                        if tok == tokenizer.mask_token:  # keep mask tokens
-                            cleaned_tokens.append(tok)
-                        elif tok in tokenizer.all_special_tokens:  # drop all other specials
-                            continue
-                        else:
-                            cleaned_tokens.append(tok)
-
-                    ### Put all the tokens back together into a string ###
-                    decoded_after = tokenizer.convert_tokens_to_string(cleaned_tokens)
-                
-                else:
-                    decoded_after = tokenizer.batch_decode(input_tokens, skip_special_tokens=True)[0]
-
-                if prompt is None:
-                    format_text = format_display_for_unconditional(decoded_after)
-                else:
-                    ### Remove Prompt Text from Assistant Text ###
-                    assistant_text = decoded_after.replace(prompt, "").strip()
-                    ### Remove Keywords user and assistant ###
-                    assistant_text = clean_text(assistant_text)
-                    format_text = format_display_for_qa(prompt, assistant_text)
-                live.update(format_text)
-                progress.update(task, advance=1)
+            ### One Live renders both the bar and the text, grouped together ###
+            progress.update(task, advance=1)
+            live.update(Group(progress, format_text))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Inference LDM")
